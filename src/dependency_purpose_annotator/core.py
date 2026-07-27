@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import tomllib
+import tomllib  # type: ignore[import-not-found]
 
 PROJECT = "dependency-purpose-annotator"
 
