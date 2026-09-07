@@ -36,3 +36,13 @@ python -m build
 The project is feature-complete for its documented v1 scope. Maintenance focuses on correctness, security, compatibility, and well-supported input improvements.
 
 Part of the [Logan Pendragon Forge open-source collection](https://www.loganpendragonforge.com/open-source/). Licensed under the [MIT License](LICENSE).
+
+## Version 1.1.0: reviewed improvements
+
+Correct scoped imports, parse Python AST evidence, separate standard/local modules, and add reviewed purposes, mappings, exceptions and baseline diffs.
+
+```bash
+dependency-purpose examples/sample.json --format json
+```
+
+Input may include `import_mappings` such as `{"PIL":"Pillow"}`, `purposes` and `exceptions` as dependency-name-to-text objects, plus `baseline` containing a prior JSON report. Evidence includes source line numbers. Python standard-library imports and local root/src modules are reported separately. JavaScript token scanning supports static ESM, side-effect imports, require and literal dynamic imports while skipping comments and string contents. Computed imports, custom aliases, regex literals and advanced bundler resolution remain outside this conservative static analysis. An exception records the operator's rationale; it never proves runtime use or deletes a dependency.

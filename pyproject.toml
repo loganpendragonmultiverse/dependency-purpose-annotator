@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dependency-purpose-annotator"
-version = "1.0.0"
+version = "1.1.0"
 description = "Explain declared dependencies from observable imports and flag apparently unused packages."
 readme = "README.md"
 requires-python = ">=3.10"
