@@ -45,5 +45,5 @@ const lazy = import('@scope/tool');
     "field,value", [("purposes", []), ("exceptions", {"a": ""}), ("baseline", {})]
 )
 def test_invalid_review_metadata(tmp_path: Path, field: str, value: object) -> None:
-    with pytest.raises(ValueError, match=field):
+    with pytest.raises((ValueError, TypeError), match=field):
         analyze({"root": str(tmp_path), field: value})

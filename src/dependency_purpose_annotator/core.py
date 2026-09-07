@@ -44,7 +44,7 @@ def _javascript_imports(source: str) -> list[tuple[str, int]]:
 
 def _require(data: dict[str, Any], key: str) -> Any:
     if not isinstance(data, dict):
-        raise ValueError("input must be a JSON object")
+        raise TypeError("input must be a JSON object")
     value = data.get(key)
     if value is None or value == "" or value == []:
         raise ValueError(f"{key} is required")
@@ -171,7 +171,7 @@ def _dependency_purpose(data: dict[str, Any]) -> dict[str, Any]:
 
 def analyze(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
-        raise ValueError("input must be a JSON object")
+        raise TypeError("input must be a JSON object")
     return {"version": 1, "project": PROJECT, **_dependency_purpose(data)}
 
 
