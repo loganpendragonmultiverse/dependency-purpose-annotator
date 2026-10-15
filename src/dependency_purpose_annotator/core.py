@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import json
 import re
 import sys
@@ -51,7 +52,7 @@ def _require(data: dict[str, Any], key: str) -> Any:
     return value
 
 
-def _dependency_purpose(data: dict[str, Any]) -> dict[str, Any]:
+def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -> dict[str, Any]:
     root = Path(_require(data, "root")).resolve()
     if not root.is_dir():
         raise ValueError("root must be an existing directory")
@@ -87,7 +88,7 @@ def _dependency_purpose(data: dict[str, Any]) -> dict[str, Any]:
     local_modules.update(
         p.parent.name for base in (root, root / "src") for p in base.glob("*/__init__.py")
     )
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.rglob("*") if paths is None else paths):
         if not path.is_file() or any(
             part in {".git", "node_modules", ".venv", "dist", "build"} for part in path.parts
         ):
@@ -172,7 +173,8 @@ def _dependency_purpose(data: dict[str, Any]) -> dict[str, Any]:
 def analyze(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise TypeError("input must be a JSON object")
-    return {"version": 1, "project": PROJECT, **_dependency_purpose(data)}
+    result = _grouped_purpose(data) if "source_groups" in data else _dependency_purpose(data)
+    return {"version": 1, "project": PROJECT, **result}
 
 
 def render_json(report: dict[str, Any]) -> str:
@@ -192,3 +194,106 @@ def render_markdown(report: dict[str, Any]) -> str:
                 ]
             )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _grouped_purpose(data: dict[str, Any]) -> dict[str, Any]:
+    root = Path(_require(data, "root")).resolve()
+    if not root.is_dir():
+        raise ValueError("root must be an existing directory")
+    groups = data["source_groups"]
+    if not isinstance(groups, list) or not groups:
+        raise ValueError("source_groups must be a nonempty list")
+    patterns: dict[str, list[str]] = {}
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"name", "include"}:
+            raise ValueError("source_groups entries need name and include")
+        name, include = group["name"], group["include"]
+        if (
+            not isinstance(name, str)
+            or name not in {"runtime", "test", "tooling"}
+            or name in patterns
+        ):
+            raise ValueError("source_groups names must be unique runtime, test or tooling")
+        if (
+            not isinstance(include, list)
+            or not include
+            or not all(
+                isinstance(p, str)
+                and p
+                and not p.startswith("/")
+                and "\\" not in p
+                and all(part not in {"", ".", ".."} for part in p.split("/"))
+                for p in include
+            )
+        ):
+            raise ValueError("source_groups include must contain relative POSIX glob patterns")
+        if len(include) != len(set(include)):
+            raise ValueError("source_groups include patterns must be unique")
+        patterns[name] = include
+    selected: dict[str, list[Path]] = {name: [] for name in sorted(patterns)}
+    ungrouped = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if (
+            not path.is_file()
+            or path.suffix not in {".py", ".js", ".jsx", ".ts", ".tsx"}
+            or any(
+                part in {".git", "node_modules", ".venv", "dist", "build"}
+                for part in relative.parts
+            )
+        ):
+            continue
+        if path.is_symlink() or any(
+            parent.is_symlink() for parent in path.parents if parent != root
+        ):
+            raise ValueError("source_groups cannot inspect symlink sources")
+        matches = [
+            name
+            for name, pats in patterns.items()
+            if any(fnmatch.fnmatchcase(relative.as_posix(), p) for p in pats)
+        ]
+        if len(matches) > 1:
+            raise ValueError("source_groups overlap at " + relative.as_posix())
+        if matches:
+            selected[matches[0]].append(path)
+        else:
+            ungrouped.append(relative.as_posix())
+    # Each group reuses the same parser, mappings, exclusions and reviewed metadata.
+    reports = {
+        name: _dependency_purpose({k: v for k, v in data.items() if k != "baseline"}, paths)
+        for name, paths in selected.items()
+    }
+    result = _dependency_purpose(data, [path for paths in selected.values() for path in paths])
+    grouped_rows = {
+        name: {row["dependency"]: row for row in report["dependencies"]}
+        for name, report in reports.items()
+    }
+    for row in result["dependencies"]:
+        evidence = {
+            name: rows[row["dependency"]]["evidence"] for name, rows in grouped_rows.items()
+        }
+        row["evidence_by_group"] = evidence
+        row["status"] = (
+            "runtime-observed"
+            if evidence.get("runtime")
+            else "non-runtime-observed"
+            if any(evidence.values())
+            else "apparently-unused"
+        )
+    if "baseline_diff" in result:
+        old = {
+            item["dependency"]: item
+            for item in data["baseline"]["dependencies"]
+            if isinstance(item, dict) and isinstance(item.get("dependency"), str)
+        }
+        result["baseline_diff"]["changed"] = sorted(
+            row["dependency"]
+            for row in result["dependencies"]
+            if row["dependency"] in old and row != old[row["dependency"]]
+        )
+    result["source_groups"] = reports
+    result["ungrouped_sources"] = ungrouped
+    result["evidence_scope"] = (
+        "Only explicitly selected sources; test/tooling imports do not prove runtime use."
+    )
+    return result
