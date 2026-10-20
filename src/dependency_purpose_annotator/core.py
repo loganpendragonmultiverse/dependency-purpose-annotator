@@ -52,25 +52,83 @@ def _require(data: dict[str, Any], key: str) -> Any:
     return value
 
 
-def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -> dict[str, Any]:
-    root = Path(_require(data, "root")).resolve()
+def _root(data: dict[str, Any]) -> Path:
+    value = _require(data, "root")
+    if not isinstance(value, str):
+        raise TypeError("root must be a path string")
+    selected = Path(value).expanduser().absolute()
+    if any(path.is_symlink() for path in (selected, *selected.parents)):
+        raise ValueError("root cannot contain symlink components")
+    root = selected.resolve()
     if not root.is_dir():
         raise ValueError("root must be an existing directory")
+    return root
+
+
+def _declared(root: Path) -> dict[str, str]:
     declared: dict[str, str] = {}
+    for name in ("pyproject.toml", "package.json"):
+        if (root / name).is_symlink():
+            raise ValueError("dependency manifests cannot be symlinks")
     pyproject = root / "pyproject.toml"
     if pyproject.exists():
         parsed = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        for raw in parsed.get("project", {}).get("dependencies", []):
-            name = re.split("[<>=!~\\[; ]", raw, maxsplit=1)[0].strip().lower().replace("_", "-")
-            if name:
-                declared[name] = "pyproject.toml"
+        project = parsed.get("project", {})
+        if not isinstance(project, dict):
+            raise TypeError("pyproject project must be an object")
+        dependencies = project.get("dependencies", [])
+        if not isinstance(dependencies, list) or not all(isinstance(v, str) for v in dependencies):
+            raise TypeError("pyproject dependencies must be an array of strings")
+        for raw in dependencies:
+            match = re.match(
+                r"([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?=[ <>=!~\[;@]|$)", raw.strip()
+            )
+            if match is None:
+                raise ValueError("pyproject dependency has no valid package name")
+            name = re.sub(r"[-_.]+", "-", match[1]).lower()
+            declared[name] = "pyproject.toml"
     package = root / "package.json"
     if package.exists():
         parsed = json.loads(package.read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict):
+            raise TypeError("package.json must be an object")
         for section in ("dependencies", "devDependencies"):
-            for name in parsed.get(section, {}):
+            dependencies = parsed.get(section, {})
+            if not isinstance(dependencies, dict) or not all(
+                isinstance(k, str) and k.strip() and isinstance(v, str)
+                for k, v in dependencies.items()
+            ):
+                raise TypeError("package dependency sections must map names to version strings")
+            for name in dependencies:
+                if name.lower() in declared and declared[name.lower()] == "pyproject.toml":
+                    raise ValueError("dependency identity overlaps Python and JavaScript manifests")
                 declared[name.lower()] = f"package.json:{section}"
-    imports: dict[str, list[str]] = defaultdict(list)
+    return declared
+
+
+def _baseline_rows(baseline: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("dependencies"), list):
+        raise TypeError("baseline must be a previous report with dependencies")
+    rows: dict[str, dict[str, Any]] = {}
+    for item in baseline["dependencies"]:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("dependency"), str)
+            or not item["dependency"].strip()
+            or item["dependency"] in rows
+        ):
+            raise ValueError("baseline dependency rows must have unique nonempty names")
+        rows[item["dependency"]] = item
+    return rows
+
+
+def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -> dict[str, Any]:
+    root = _root(data)
+    declared = _declared(root)
+    imports: dict[str, dict[str, list[str]]] = {
+        "python": defaultdict(list),
+        "javascript": defaultdict(list),
+    }
     ignored: dict[str, list[str]] = defaultdict(list)
     mappings = data.get("import_mappings", {})
     purposes = data.get("purposes", {})
@@ -89,9 +147,16 @@ def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -
         p.parent.name for base in (root, root / "src") for p in base.glob("*/__init__.py")
     )
     for path in sorted(root.rglob("*") if paths is None else paths):
-        if not path.is_file() or any(
-            part in {".git", "node_modules", ".venv", "dist", "build"} for part in path.parts
+        if any(
+            part in {".git", "node_modules", ".venv", "dist", "build"}
+            for part in path.relative_to(root).parts
         ):
+            continue
+        if path.is_symlink() and (
+            path.is_dir() or path.suffix in {".py", ".js", ".jsx", ".ts", ".tsx"}
+        ):
+            raise ValueError("cannot inspect symlink sources")
+        if not path.is_file():
             continue
         if path.suffix == ".py":
             try:
@@ -119,8 +184,8 @@ def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -
                             evidence + ":" + name
                         )
                         continue
-                    name = mappings.get(name, name).lower().replace("_", "-")
-                    imports[name].append(evidence)
+                    name = re.sub(r"[-_.]+", "-", mappings.get(name, name)).lower()
+                    imports["python"][name].append(evidence)
         elif path.suffix in {".js", ".jsx", ".ts", ".tsx"}:
             for name, line in _javascript_imports(
                 path.read_text(encoding="utf-8", errors="ignore")
@@ -130,13 +195,31 @@ def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -
                 package_name = (
                     "/".join(name.split("/")[:2]) if name.startswith("@") else name.split("/")[0]
                 )
-                imports[package_name.lower()].append(f"{path.relative_to(root).as_posix()}:{line}")
+                imports["javascript"][package_name.lower()].append(
+                    f"{path.relative_to(root).as_posix()}:{line}"
+                )
+
+    def evidence_for(name: str, source: str) -> list[str]:
+        ecosystem = "python" if source == "pyproject.toml" else "javascript"
+        return imports[ecosystem].get(name, [])
+
+    undeclared = {
+        ecosystem: sorted(
+            set(observed)
+            - {
+                name
+                for name, source in declared.items()
+                if (source == "pyproject.toml") == (ecosystem == "python")
+            }
+        )
+        for ecosystem, observed in imports.items()
+    }
     rows = [
         {
             "dependency": name,
             "declared_in": source,
-            "evidence": sorted(set(imports.get(name, []))),
-            "status": "observed" if imports.get(name) else "apparently-unused",
+            "evidence": sorted(set(evidence_for(name, source))),
+            "status": "observed" if evidence_for(name, source) else "apparently-unused",
             **({"purpose": purposes[name]} if name in purposes else {}),
             **({"reviewed_exception": exceptions[name]} if name in exceptions else {}),
         }
@@ -147,18 +230,13 @@ def _dependency_purpose(data: dict[str, Any], paths: list[Path] | None = None) -
         "apparently_unused": [
             item["dependency"] for item in rows if item["status"] == "apparently-unused"
         ],
-        "undeclared_imports": sorted(set(imports) - set(declared)),
+        "undeclared_imports": sorted(set().union(*undeclared.values())),
+        "undeclared_imports_by_ecosystem": undeclared,
         "excluded_import_evidence": dict(sorted(ignored.items())),
     }
     baseline = data.get("baseline")
     if baseline is not None:
-        if not isinstance(baseline, dict) or not isinstance(baseline.get("dependencies"), list):
-            raise ValueError("baseline must be a previous report with dependencies")
-        old = {
-            item["dependency"]: item
-            for item in baseline["dependencies"]
-            if isinstance(item, dict) and isinstance(item.get("dependency"), str)
-        }
+        old = _baseline_rows(baseline)
         current = {item["dependency"]: item for item in rows}
         result["baseline_diff"] = {
             "added": sorted(current.keys() - old.keys()),
@@ -197,9 +275,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def _grouped_purpose(data: dict[str, Any]) -> dict[str, Any]:
-    root = Path(_require(data, "root")).resolve()
-    if not root.is_dir():
-        raise ValueError("root must be an existing directory")
+    root = _root(data)
     groups = data["source_groups"]
     if not isinstance(groups, list) or not groups:
         raise ValueError("source_groups must be a nonempty list")
@@ -234,6 +310,15 @@ def _grouped_purpose(data: dict[str, Any]) -> dict[str, Any]:
     ungrouped = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
+        if (
+            path.is_symlink()
+            and (path.is_dir() or path.suffix in {".py", ".js", ".jsx", ".ts", ".tsx"})
+            and not any(
+                part in {".git", "node_modules", ".venv", "dist", "build"}
+                for part in relative.parts
+            )
+        ):
+            raise ValueError("source_groups cannot inspect symlink sources")
         if (
             not path.is_file()
             or path.suffix not in {".py", ".js", ".jsx", ".ts", ".tsx"}
@@ -281,11 +366,7 @@ def _grouped_purpose(data: dict[str, Any]) -> dict[str, Any]:
             else "apparently-unused"
         )
     if "baseline_diff" in result:
-        old = {
-            item["dependency"]: item
-            for item in data["baseline"]["dependencies"]
-            if isinstance(item, dict) and isinstance(item.get("dependency"), str)
-        }
+        old = _baseline_rows(data["baseline"])
         result["baseline_diff"]["changed"] = sorted(
             row["dependency"]
             for row in result["dependencies"]
