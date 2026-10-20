@@ -65,3 +65,23 @@ Optionally add `source_groups` to the JSON input:
 Names are unique `runtime`, `test`, or `tooling`; one or more groups may be supplied. Includes are nonempty lists of relative POSIX globs, matched case-sensitively against the complete source path (`*` can span `/`). Duplicate patterns and a source matched by multiple groups are rejected. Unmatched sources are listed in `ungrouped_sources`, not silently treated as runtime. Grouped scans refuse symlink source files.
 
 Each dependency gains `evidence_by_group` and an explicit `runtime-observed`, `non-runtime-observed`, or `apparently-unused` status. Group subreports retain their own import evidence, excluded standard/local-module evidence, and undeclared imports. Mappings, purposes and exceptions apply consistently to every group; Python and JavaScript use the existing conservative static parsers. A test/tooling import proves only static evidence in that selected group. Absence is not proof that a package can be removed. Baseline comparisons include changed grouped dependency rows. Omitting `source_groups` preserves the legacy report shape and statuses.
+
+## Audited input and source boundaries
+
+Both grouped and ungrouped scans reject symlink source files and symlink root
+components; dependency manifests cannot be symlinks either. Ignored path names
+are evaluated relative to the selected root, so a repository inside a directory
+named `build` is still inspected. Scan a stable, trusted local tree: concurrent
+file changes are not an atomic filesystem snapshot.
+
+Malformed manifest sections and malformed/duplicate baseline dependency names
+are errors, not an empty inventory. Python distribution names normalize runs of
+hyphens, underscores and periods consistently with mapped imports. This still
+requires explicit mappings when import and distribution names differ.
+Reports are created exclusively and never replace a competing writer's output.
+
+Identical declared names shared between Python and JavaScript manifests are
+rejected rather than silently replacing one ecosystem's declaration. Inspect
+those ecosystems independently; this tool does not equate cross-language packages.
+
+Python and JavaScript import evidence is tracked separately. An import in one language cannot prove use of a same-named declaration in the other ecosystem; undeclared imports also include an ecosystem breakdown.

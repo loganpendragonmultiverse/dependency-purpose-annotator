@@ -11,3 +11,10 @@ Correct scoped imports, parse Python AST evidence, separate standard/local modul
 Input may include `import_mappings` such as `{"PIL":"Pillow"}`, `purposes` and `exceptions` as dependency-name-to-text objects, plus `baseline` containing a prior JSON report. Evidence includes source line numbers. Python standard-library imports and local root/src modules are reported separately. JavaScript token scanning supports static ESM, side-effect imports, require and literal dynamic imports while skipping comments and string contents. Computed imports, custom aliases, regex literals and advanced bundler resolution remain outside this conservative static analysis. An exception records the operator's rationale; it never proves runtime use or deletes a dependency.
 
 Local formatting, lint, strict types and regression tests pass. Public release completion requires the protected CI/CodeQL matrix, tagged artifacts and matching Forge catalog/detail deployment.
+
+The v1.2.1 audit validates manifest structures and baseline identities before
+classification, applies consistent Python package-name normalization and source
+symlink refusal in both modes, and creates reports exclusively. Do not replace
+validation failures with successful empty inventories.
+
+Python and JavaScript import evidence is tracked separately. An import in one language cannot prove use of a same-named declaration in the other ecosystem; undeclared imports also include an ecosystem breakdown.
